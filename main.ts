@@ -1,134 +1,151 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import {
+  App,
+  MarkdownEditView,
+  MarkdownView,
+  Modal,
+  Notice,
+  Plugin,
+  PluginSettingTab,
+  ProgressBarComponent,
+  Setting,
+  TextAreaComponent,
+  TextComponent,
+} from "obsidian";
+import { cachedFetchCalendar, insertCalendarDay } from "./ical";
+import { parse } from "@markwhen/parser";
+import {
+  getDateFromFile,
+  appHasDailyNotesPluginLoaded,
+} from "obsidian-daily-notes-interface";
+import { CalendarResponse } from "node-ical";
+import { fetchText } from "./fetch";
+interface TFSettings {
+  CalendarURL: string;
+}
+const DEFAULT_SETTINGS: TFSettings = {
+  CalendarURL: "",
+};
+export default class TF extends Plugin {
+  settings: TFSettings;
+  sync: Function;
 
-// Remember to rename these classes and interfaces!
+  async onload() {
+    await this.loadSettings();
+    this.sync();
 
-interface MyPluginSettings {
-	mySetting: string;
+    const oneMinute = 60 * 1000;
+    this.registerInterval(window.setInterval(() => this.sync(), oneMinute));
+
+    this.addCommand({
+      id: "daily-note-fetch",
+      name: "Insert Calendar into Daily Note",
+      checkCallback: (checking: boolean) => {
+        let leaf = this.app.workspace.getActiveViewOfType(MarkdownView);
+        console.log(leaf);
+        if (!appHasDailyNotesPluginLoaded()) {
+          new Notice("TF requires the daily notes plugin to be enabled");
+        }
+
+        if (leaf) {
+          const date = getDateFromFile(leaf.file, "day");
+          if (date === null) {
+            return false;
+          }
+
+          if (!checking) {
+            this.sync().then((calendar: CalendarResponse) => {
+              insertCalendarDay(calendar, date, leaf.editor);
+            });
+          }
+          return true;
+        }
+        return false;
+      },
+    });
+
+    this.addSettingTab(new TFSettingTab(this.app, this));
+    this.registerMarkdownCodeBlockProcessor("markwhen", (source, el, ctx) => {
+      const parsed = parse(source);
+      console.log(parsed);
+      console.log(el);
+      console.log(ctx);
+      // TODO: Get html into Obsidian preview pane
+    });
+  }
+  onunload() {}
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.sync = cachedFetchCalendar(this.settings.CalendarURL);
+  }
+  async saveSettings() {
+    await this.saveData(this.settings);
+    this.sync = cachedFetchCalendar(this.settings.CalendarURL);
+  }
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+class TFSettingTab extends PluginSettingTab {
+  plugin: TF;
+  errors: string;
+  state: number;
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+  constructor(app: App, plugin: TF) {
+    super(app, plugin);
+    this.plugin = plugin;
+    this.errors = "";
+    this.state = 0;
+    this.display();
+  }
+  display(): void {
+    let { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "TF Settings" });
+    new Setting(containerEl)
+      .setName("Google Calendar Link")
+      .setDesc("Secret Address in iCal format")
+      .addText((text) =>
+        text
+          .setPlaceholder("ICS URL")
+          .setValue(this.plugin.settings.CalendarURL)
+          .onChange(async (value) => {
+            this.plugin.settings.CalendarURL = value;
+            await this.plugin.saveSettings();
+          })
+      )
+      .addButton((button) => {
+        button.setButtonText("Test").onClick(async () => {
+          this.errors = "";
+          this.state = 37;
+          this.display();
+          try {
+            await fetchText(this.plugin.settings.CalendarURL, (error, data) => {
+              if (error) {
+                this.errors = error;
+                throw error;
+              }
+              this.errors = "";
+              this.state = 57;
+              this.display();
+              this.plugin.sync();
+              this.state = 100;
+              this.display();
+            });
+          } catch (error) {
+            this.errors = error;
+            this.display();
+          }
+        });
+      });
+    const progress = new ProgressBarComponent(containerEl);
+    progress.setValue(this.state);
 
-	async onload() {
-		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
-
-	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+    const logDisplay = containerEl.createEl("pre");
+    logDisplay.style.fontFamily = "monospace";
+    logDisplay.style.fontSize = "12px";
+    logDisplay.style.width = "100%";
+    //logDisplay.style.padding = "8px";
+    logDisplay.style.overflowY = "auto"; // Enable vertical scrolling if content exceeds height
+    logDisplay.style.maxHeight = "200px"; // Max height before scrolling
+    logDisplay.textContent = this.errors;
+  }
 }
